@@ -10,7 +10,7 @@ use cosmos_sdk_proto::cosmos::{
     staking::v1beta1::{Delegation, Validator as CosmosValidator},
 };
 use cosmos_sdk_proto::traits::Message;
-use cosmwasm_std::{from_json, Addr, Coin, Decimal, StdError, Uint128};
+use cosmwasm_std::{from_json, Addr, Coin, Decimal, Decimal256, StdError, Uint128, Uint256};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{ops::Div, str::FromStr};
@@ -376,15 +376,48 @@ impl KVReconstruct for Delegations {
             }
             let validator: CosmosValidator = CosmosValidator::decode(chunk[1].value.as_slice())?;
 
-            let delegation_shares =
-                Decimal::from_atomics(Uint128::from_str(&delegation_sdk.shares)?, DECIMAL_PLACES)?;
+            let delegation_shares_result = Decimal256::from_atomics(
+                Uint128::from_str(&delegation_sdk.shares)?,
+                DECIMAL_PLACES,
+            );
 
-            let delegator_shares = Decimal::from_atomics(
+            let delegation_shares = match delegation_shares_result {
+                Ok(value) => value,
+                Err(e) => {
+                    return Err(NeutronError::Std(StdError::generic_err(format!(
+                        "match delegation_shares_result failed: {:?}",
+                        e
+                    ))));
+                }
+            };
+
+            let delegator_shares_result = Decimal256::from_atomics(
                 Uint128::from_str(&validator.delegator_shares)?,
                 DECIMAL_PLACES,
-            )?;
+            );
 
-            let validator_tokens = Decimal::from_atomics(Uint128::from_str(&validator.tokens)?, 0)?;
+            let delegator_shares = match delegator_shares_result {
+                Ok(value) => value,
+                Err(e) => {
+                    return Err(NeutronError::Std(StdError::generic_err(format!(
+                        "match delegator_shares_result failed: {:?}",
+                        e
+                    ))));
+                }
+            };
+
+            let validator_tokens_result =
+                Decimal256::from_atomics(Uint128::from_str(&validator.tokens)?, 0);
+
+            let validator_tokens = match validator_tokens_result {
+                Ok(value) => value,
+                Err(e) => {
+                    return Err(NeutronError::Std(StdError::generic_err(format!(
+                        "match validator_tokens_result failed: {:?}",
+                        e
+                    ))));
+                }
+            };
 
             // https://github.com/cosmos/cosmos-sdk/blob/35ae2c4c72d4aeb33447d5a7af23ca47f786606e/x/staking/keeper/querier.go#L463
             // delegated_tokens = quotient(delegation.shares * validator.tokens / validator.total_shares);
@@ -392,12 +425,21 @@ impl KVReconstruct for Delegations {
                 .checked_mul(validator_tokens)?
                 .div(delegator_shares)
                 .atomics()
-                .u128()
-                .div(DECIMAL_FRACTIONAL);
+                .div(Uint256::from(DECIMAL_FRACTIONAL));
 
-            delegation_std.amount = Coin::new(delegated_tokens, &denom);
-
-            delegations.push(delegation_std);
+            let tokens128_s = delegated_tokens.to_string();
+            match tokens128_s.parse::<u128>() {
+                Ok(num) => {
+                    delegation_std.amount = Coin::new(num, &denom);
+                    delegations.push(delegation_std);
+                }
+                Err(e) => {
+                    return Err(NeutronError::Std(StdError::generic_err(format!(
+                        "match tokens128_s.parse::<u128>() failed: {:?}",
+                        e
+                    ))));
+                }
+            }
         }
 
         Ok(Delegations { delegations })
